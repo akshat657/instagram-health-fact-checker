@@ -283,10 +283,15 @@ Provide accurate, evidence-based answer. Remind user to consult healthcare profe
     
     def dict_to_result(self, data: Dict) -> FactCheckResult:
         """Convert dictionary to FactCheckResult"""
-        verdicts = [
-            ClaimVerdict(**v) if isinstance(v, dict) else v 
-            for v in data.get('verdicts', [])
-        ]
+        verdicts = []
+        for v in data.get('verdicts', []):
+            if isinstance(v, dict):
+                # Handle legacy records missing 'claim_english' field
+                if 'claim_english' not in v:
+                    v['claim_english'] = v.get('claim', '')
+                verdicts.append(ClaimVerdict(**v))
+            else:
+                verdicts.append(v)
         
         return FactCheckResult(
             url=data.get('url', ''),
