@@ -1,0 +1,13 @@
+Roti ,cancer ,acrylamide ka kya relation hai ?
+when carbohydrate-rich foods (like wheat flour) are cooked at high temperatures (>120°C), a chemical called acrylamide can form via the Maillard reaction (between asparagine and reducing sugars).
+
+Acrylamide & cancer classification
+	•	International Agency for Research on Cancer (IARC) classifies acrylamide as Group 2A — Probable human carcinogen
+	•	Classification is based mainly on:
+	•	Strong animal data
+	•	Mechanistic evidence (genotoxicity after metabolic activation)
+
+Human epidemiological evidence
+
+Large cohort and case-control studies show:
+	•	No consistent or strong association between usual dietary acrylamide intake and most human cancers
