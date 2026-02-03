@@ -1,6 +1,7 @@
 """
 PubMed API Handler - Free scientific article search
 Uses NCBI E-utilities (completely free, no API key required for basic use)
+Enhanced with better error handling and caching
 """
 
 import time
@@ -9,6 +10,10 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
+import hashlib
+from pathlib import Path
+import json
+import tempfile
 
 
 @dataclass
@@ -50,6 +55,10 @@ class PubMedAPI:
         self.session = requests.Session()
         self.last_request_time = 0
         self.min_request_interval = 0.34 if api_key else 0.5  # Rate limiting
+        
+        # Setup cache
+        self.cache_dir = Path(tempfile.gettempdir()) / "pubmed_cache"
+        self.cache_dir.mkdir(exist_ok=True)
     
     def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
@@ -57,6 +66,33 @@ class PubMedAPI:
         if elapsed < self.min_request_interval:
             time.sleep(self.min_request_interval - elapsed)
         self.last_request_time = time.time()
+    
+    def _get_cache_key(self, query: str, search_type: str = "search") -> str:
+        """Generate cache key"""
+        return hashlib.md5(f"{search_type}_{query}".encode()).hexdigest()
+    
+    def _get_cached_result(self, cache_key: str) -> Optional[any]:
+        """Get cached result if exists and not expired (24 hours)"""
+        cache_file = self.cache_dir / f"{cache_key}.json"
+        
+        if cache_file.exists():
+            try:
+                cache_age = time.time() - cache_file.stat().st_mtime
+                if cache_age < 86400:  # 24 hours
+                    with open(cache_file, 'r') as f:
+                        return json.load(f)
+            except Exception:
+                pass
+        return None
+    
+    def _cache_result(self, cache_key: str, data: any):
+        """Cache result"""
+        cache_file = self.cache_dir / f"{cache_key}.json"
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(data, f)
+        except Exception:
+            pass
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def search(self, query: str, max_results: int = 10, 
@@ -72,6 +108,12 @@ class PubMedAPI:
         Returns:
             List of PubMed IDs (PMIDs)
         """
+        cache_key = self._get_cache_key(f"{query}_{max_results}_{filter_reviews}", "search")
+        cached = self._get_cached_result(cache_key)
+        if cached:
+            print(f"[*] Using cached PubMed search results")
+            return cached
+        
         self._rate_limit()
         
         # Enhance query for health claims
@@ -91,11 +133,20 @@ class PubMedAPI:
         if self.api_key:
             params["api_key"] = self.api_key
         
-        response = self.session.get(f"{self.BASE_URL}/esearch.fcgi", params=params)
-        response.raise_for_status()
-        
-        data = response.json()
-        return data.get("esearchresult", {}).get("idlist", [])
+        try:
+            response = self.session.get(f"{self.BASE_URL}/esearch.fcgi", params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            pmids = data.get("esearchresult", {}).get("idlist", [])
+            
+            # Cache the result
+            self._cache_result(cache_key, pmids)
+            
+            return pmids
+        except Exception as e:
+            print(f"[!] PubMed search error: {e}")
+            return []
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def fetch_articles(self, pmids: List[str]) -> List[PubMedArticle]:
@@ -111,6 +162,12 @@ class PubMedAPI:
         if not pmids:
             return []
         
+        cache_key = self._get_cache_key("_".join(pmids), "fetch")
+        cached = self._get_cached_result(cache_key)
+        if cached:
+            print(f"[*] Using cached PubMed articles")
+            return [PubMedArticle(**article) for article in cached]
+        
         self._rate_limit()
         
         params = {
@@ -123,10 +180,30 @@ class PubMedAPI:
         if self.api_key:
             params["api_key"] = self.api_key
         
-        response = self.session.get(f"{self.BASE_URL}/efetch.fcgi", params=params)
-        response.raise_for_status()
-        
-        return self._parse_articles_xml(response.text)
+        try:
+            response = self.session.get(f"{self.BASE_URL}/efetch.fcgi", params=params, timeout=15)
+            response.raise_for_status()
+            
+            articles = self._parse_articles_xml(response.text)
+            
+            # Cache the result
+            self._cache_result(cache_key, [
+                {
+                    "pmid": a.pmid,
+                    "title": a.title,
+                    "abstract": a.abstract,
+                    "authors": a.authors,
+                    "journal": a.journal,
+                    "pub_date": a.pub_date,
+                    "doi": a.doi
+                }
+                for a in articles
+            ])
+            
+            return articles
+        except Exception as e:
+            print(f"[!] PubMed fetch error: {e}")
+            return []
     
     def _parse_articles_xml(self, xml_text: str) -> List[PubMedArticle]:
         """Parse PubMed XML response into article objects."""
@@ -194,11 +271,12 @@ class PubMedAPI:
                         doi=doi
                     ))
                     
-                except Exception:
+                except Exception as e:
+                    print(f"[!] Error parsing article: {e}")
                     continue
                     
-        except ET.ParseError:
-            pass
+        except ET.ParseError as e:
+            print(f"[!] XML parse error: {e}")
         
         return articles
     
@@ -214,19 +292,21 @@ class PubMedAPI:
             List of relevant PubMedArticle objects
         """
         # Clean and optimize query for PubMed
-        # Remove common words and focus on medical terms
-        stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'will', 'can', 
-                      'could', 'should', 'would', 'may', 'might', 'must', 'shall',
-                      'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it',
-                      'we', 'they', 'what', 'which', 'who', 'whom', 'whose', 'where',
-                      'when', 'why', 'how', 'if', 'then', 'else', 'and', 'or', 'not',
-                      'but', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for',
-                      'with', 'about', 'against', 'between', 'into', 'through', 'during',
-                      'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
-                      'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further',
-                      'once', 'here', 'there', 'all', 'each', 'few', 'more', 'most',
-                      'other', 'some', 'such', 'no', 'nor', 'only', 'own', 'same', 'so',
-                      'than', 'too', 'very', 'just', 'also', 'now', 'your', 'my', 'our'}
+        stop_words = {
+            'the', 'a', 'an', 'is', 'are', 'was', 'were', 'will', 'can', 
+            'could', 'should', 'would', 'may', 'might', 'must', 'shall',
+            'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it',
+            'we', 'they', 'what', 'which', 'who', 'whom', 'whose', 'where',
+            'when', 'why', 'how', 'if', 'then', 'else', 'and', 'or', 'not',
+            'but', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for',
+            'with', 'about', 'against', 'between', 'into', 'through', 'during',
+            'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+            'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further',
+            'once', 'here', 'there', 'all', 'each', 'few', 'more', 'most',
+            'other', 'some', 'such', 'no', 'nor', 'only', 'own', 'same', 'so',
+            'than', 'too', 'very', 'just', 'also', 'now', 'your', 'my', 'our',
+            'causes', 'cause', 'helps', 'help'
+        }
         
         words = claim.lower().split()
         query_words = [w for w in words if w not in stop_words and len(w) > 2]

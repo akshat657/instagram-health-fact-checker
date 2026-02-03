@@ -1,6 +1,7 @@
 """
 Fact Checker - Uses English translations for better evidence matching
 Supports Hindi, Urdu, English, and mixed language videos
+Simplified Groq client initialization
 """
 
 import os
@@ -8,7 +9,6 @@ import json
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from groq import Groq
 
 from .evidence_finder import MultiSourceEvidenceFinder
 from .claim_extractor import ClaimExtractor, HealthClaim
@@ -83,12 +83,45 @@ Provide accurate, evidence-based answer. Remind user to consult healthcare profe
     def __init__(self, api_key: Optional[str] = None, ncbi_email: str = "healthchecker@example.com"):
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
         if not self.api_key:
-            raise ValueError("Groq API key required.")
+            raise ValueError("Groq API key required. Set GROQ_API_KEY in .env or pass as parameter.")
         
-        self.client = Groq(api_key=self.api_key)
+        # Initialize Groq client with ONLY the api_key parameter
+        self.client = self._initialize_groq_client()
+        
         self.model = "llama-3.3-70b-versatile"
         self.evidence_finder = MultiSourceEvidenceFinder(ncbi_email=ncbi_email)
         self.claim_extractor = ClaimExtractor(api_key=self.api_key)
+    
+    def _initialize_groq_client(self):
+        """Initialize Groq client with proper error handling"""
+        try:
+            # Try importing groq
+            from groq import Groq
+            
+            # Initialize with ONLY api_key - no other parameters
+            client = Groq(api_key=self.api_key)
+            print("[*] Groq client initialized successfully")
+            return client
+            
+        except ImportError:
+            raise ImportError(
+                "Groq library not installed. Please run:\n"
+                "pip install groq"
+            )
+        except Exception as e:
+            # If initialization fails, provide helpful error message
+            error_msg = str(e)
+            if "proxies" in error_msg:
+                raise ValueError(
+                    "Groq initialization failed due to version conflict.\n"
+                    "Please run these commands:\n"
+                    "1. pip uninstall groq -y\n"
+                    "2. pip cache purge\n"
+                    "3. pip install groq==0.4.2\n"
+                    "4. Restart the application"
+                )
+            else:
+                raise ValueError(f"Failed to initialize Groq client: {error_msg}")
     
     def _verify_claim(self, claim: HealthClaim) -> ClaimVerdict:
         """Verify claim using ENGLISH translation for evidence search."""
@@ -128,8 +161,8 @@ Provide accurate, evidence-based answer. Remind user to consult healthcare profe
         sources = [e.url for e in evidence_list if e.url]
         
         return ClaimVerdict(
-            claim=claim.claim_text,           # Show original to user
-            claim_english=claim.claim_english, # Store English for reference
+            claim=claim.claim_text,
+            claim_english=claim.claim_english,
             verdict=result.get("verdict", "UNVERIFIED"),
             confidence=float(result.get("confidence", 0.5)),
             explanation=result.get("explanation", ""),
@@ -245,4 +278,24 @@ Provide accurate, evidence-based answer. Remind user to consult healthcare profe
             return f"Error: {e}"
     
     def to_dict(self, result: FactCheckResult) -> Dict:
+        """Convert FactCheckResult to dictionary"""
         return asdict(result)
+    
+    def dict_to_result(self, data: Dict) -> FactCheckResult:
+        """Convert dictionary to FactCheckResult"""
+        verdicts = [
+            ClaimVerdict(**v) if isinstance(v, dict) else v 
+            for v in data.get('verdicts', [])
+        ]
+        
+        return FactCheckResult(
+            url=data.get('url', ''),
+            transcript=data.get('transcript', ''),
+            claims_found=data.get('claims_found', 0),
+            verdicts=verdicts,
+            overall_rating=data.get('overall_rating', ''),
+            overall_confidence=data.get('overall_confidence', 0.0),
+            summary=data.get('summary', ''),
+            timestamp=data.get('timestamp', ''),
+            language=data.get('language', 'english')
+        )

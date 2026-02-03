@@ -1,6 +1,7 @@
 """
 Smart Transcript Corrector - Uses Llama to fix transcription errors
 Works for ANY unknown medical/health terms
+Enhanced with better prompting and fallback strategies
 """
 
 import os
@@ -24,11 +25,12 @@ YOUR TASK:
 4. Return ONLY the corrected transcript, nothing else
 
 COMMON TRANSCRIPTION ERRORS TO LOOK FOR:
-- Chemical names (e.g., "acral mites" → "acrylamide")
-- Medical terms (e.g., "die a betes" → "diabetes")  
-- Scientific terms (e.g., "carsino gen" → "carcinogen")
+- Chemical names (e.g., "acral mites" → "acrylamide", "acryl amide" → "acrylamide")
+- Medical terms (e.g., "die a betes" → "diabetes", "hyper tension" → "hypertension")  
+- Scientific terms (e.g., "carsino gen" → "carcinogen", "anti oxidant" → "antioxidant")
 - Drug names, vitamin names, disease names
-- Units (e.g., "micro gram" → "microgram")
+- Units (e.g., "micro gram" → "microgram", "milli liter" → "milliliter")
+- Hindi/Urdu medical terms transcribed incorrectly in English
 
 IMPORTANT RULES:
 - Keep the original meaning intact
@@ -37,22 +39,86 @@ IMPORTANT RULES:
 - Don't add or remove content
 - Preserve the speaker's intent
 - If a word seems wrong but you're not sure, leave it as is
+- Maintain the same language (don't translate Hindi to English)
 
 ORIGINAL TRANSCRIPT:
 {transcript}
 
-CORRECTED TRANSCRIPT:"""
+CORRECTED TRANSCRIPT (return ONLY the corrected text, no preamble):"""
+
+    # Extended dictionary for common medical term errors
+    MEDICAL_CORRECTIONS = {
+        # Acrylamide variations
+        "acral mites": "acrylamide",
+        "acral mite": "acrylamide",
+        "acryl mites": "acrylamide",
+        "acral might": "acrylamide",
+        "acryl amide": "acrylamide",
+        "acrylmide": "acrylamide",
+        "acrylamid": "acrylamide",
+        
+        # Carcinogen
+        "carcino gen": "carcinogen",
+        "karcinogen": "carcinogen",
+        "carcinogene": "carcinogen",
+        
+        # Common diseases
+        "die a betes": "diabetes",
+        "dia betes": "diabetes",
+        "diabetes mellitus": "diabetes mellitus",
+        "hyper tension": "hypertension",
+        "cardio vascular": "cardiovascular",
+        "osteo porosis": "osteoporosis",
+        "arthri tis": "arthritis",
+        
+        # Cholesterol
+        "coles terol": "cholesterol",
+        "cholestrol": "cholesterol",
+        "chole sterol": "cholesterol",
+        
+        # Vitamins & minerals
+        "vitamin d": "vitamin D",
+        "vitamin b12": "vitamin B12",
+        "vitamin b 12": "vitamin B12",
+        "cal cium": "calcium",
+        "magne sium": "magnesium",
+        "pota ssium": "potassium",
+        
+        # Common health terms
+        "anti oxidant": "antioxidant",
+        "anti biotic": "antibiotic",
+        "pro biotic": "probiotic",
+        "meta bolism": "metabolism",
+        "in flammation": "inflammation",
+        "anti inflammatory": "anti-inflammatory",
+        
+        # Units
+        "micro gram": "microgram",
+        "milli gram": "milligram",
+        "kilo calorie": "kilocalorie",
+        "milli liter": "milliliter",
+        
+        # Others
+        "ome ga 3": "omega-3",
+        "ome ga 6": "omega-6",
+        "glu ten": "gluten",
+        "lac tose": "lactose",
+    }
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
         self.client = None
         
         if self.api_key:
-            self.client = Groq(api_key=self.api_key)
+            try:
+                self.client = Groq(api_key=self.api_key)
+            except Exception as e:
+                print(f"[!] Failed to initialize Groq client: {e}")
+                self.client = None
     
     def correct(self, transcript: str) -> Dict:
         """
-        Correct transcript using Llama AI.
+        Correct transcript using Llama AI with fallback to dictionary.
         
         Returns:
             Dict with corrected transcript and metadata
@@ -65,16 +131,23 @@ CORRECTED TRANSCRIPT:"""
                 "method": "skipped_too_short"
             }
         
-        # If no API key, use basic corrections
-        if not self.client:
-            basic_corrected = self._basic_corrections(transcript)
-            return {
-                "corrected": basic_corrected,
-                "original": transcript,
-                "corrections_made": basic_corrected != transcript,
-                "method": "basic_dictionary"
-            }
+        # Try AI correction first
+        if self.client:
+            ai_result = self._ai_correction(transcript)
+            if ai_result["corrections_made"]:
+                return ai_result
         
+        # Fallback to dictionary corrections
+        dict_corrected = self._dictionary_corrections(transcript)
+        return {
+            "corrected": dict_corrected,
+            "original": transcript,
+            "corrections_made": dict_corrected != transcript,
+            "method": "dictionary_fallback"
+        }
+    
+    def _ai_correction(self, transcript: str) -> Dict:
+        """Use Llama AI for corrections"""
         try:
             print("[*] Correcting transcript with Llama AI...")
             
@@ -83,11 +156,11 @@ CORRECTED TRANSCRIPT:"""
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a medical transcription expert. Fix any transcription errors in health/medical content. Return ONLY the corrected text."
+                        "content": "You are a medical transcription expert. Fix transcription errors in health/medical content. Return ONLY the corrected text, no preamble, no explanation."
                     },
                     {
                         "role": "user", 
-                        "content": self.CORRECTION_PROMPT.format(transcript=transcript)
+                        "content": self.CORRECTION_PROMPT.format(transcript=transcript[:4000])
                     }
                 ],
                 temperature=0.1,  # Low temperature for consistent corrections
@@ -96,33 +169,58 @@ CORRECTED TRANSCRIPT:"""
             
             corrected = (response.choices[0].message.content or "").strip()
             
-            # Clean up response (remove any preamble if Llama added it)
+            # Clean up response
             corrected = self._clean_response(corrected, transcript)
             
             if corrected != transcript:
-                print("[*] Transcript corrections applied by Llama")
+                print("[*] ✨ Transcript corrections applied by Llama AI")
                 self._show_diff(transcript, corrected)
-            
-            return {
-                "corrected": corrected,
-                "original": transcript,
-                "corrections_made": corrected != transcript,
-                "method": "llama_ai"
-            }
+                
+                return {
+                    "corrected": corrected,
+                    "original": transcript,
+                    "corrections_made": True,
+                    "method": "llama_ai"
+                }
+            else:
+                print("[*] No corrections needed (AI)")
+                return {
+                    "corrected": transcript,
+                    "original": transcript,
+                    "corrections_made": False,
+                    "method": "llama_ai_no_changes"
+                }
             
         except Exception as e:
             print(f"[!] Llama correction failed: {e}")
-            # Fallback to basic corrections
-            basic_corrected = self._basic_corrections(transcript)
             return {
-                "corrected": basic_corrected,
+                "corrected": transcript,
                 "original": transcript,
-                "corrections_made": basic_corrected != transcript,
-                "method": "basic_fallback"
+                "corrections_made": False,
+                "method": "ai_error"
             }
     
+    def _dictionary_corrections(self, transcript: str) -> str:
+        """Apply dictionary-based corrections"""
+        result = transcript
+        corrections_applied = []
+        
+        for wrong, correct in self.MEDICAL_CORRECTIONS.items():
+            # Case-insensitive replacement
+            pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+            if pattern.search(result):
+                result = pattern.sub(correct, result)
+                corrections_applied.append(f"{wrong} → {correct}")
+        
+        if corrections_applied:
+            print(f"[*] Applied {len(corrections_applied)} dictionary corrections")
+            for correction in corrections_applied[:5]:  # Show first 5
+                print(f"    - {correction}")
+        
+        return result
+    
     def _clean_response(self, response: str, original: str) -> str:
-        """Clean up Llama's response to extract just the transcript."""
+        """Clean up Llama's response to extract just the transcript"""
         # Remove common preambles
         preambles = [
             "Here is the corrected transcript:",
@@ -130,6 +228,7 @@ CORRECTED TRANSCRIPT:"""
             "Here's the corrected version:",
             "The corrected transcript is:",
             "CORRECTED TRANSCRIPT:",
+            "Corrected version:",
         ]
         
         cleaned = response
@@ -140,15 +239,25 @@ CORRECTED TRANSCRIPT:"""
         # Remove quotes if wrapped
         if cleaned.startswith('"') and cleaned.endswith('"'):
             cleaned = cleaned[1:-1]
+        if cleaned.startswith("'") and cleaned.endswith("'"):
+            cleaned = cleaned[1:-1]
         
-        # If response is too different (>50% change), return original
-        if len(cleaned) < len(original) * 0.5 or len(cleaned) > len(original) * 1.5:
+        # Remove markdown code blocks
+        if cleaned.startswith("```") and cleaned.endswith("```"):
+            cleaned = cleaned[3:-3].strip()
+            if cleaned.startswith("text\n"):
+                cleaned = cleaned[5:]
+        
+        # Sanity check: if response is too different, return original
+        len_ratio = len(cleaned) / len(original) if len(original) > 0 else 0
+        if len_ratio < 0.5 or len_ratio > 1.5:
+            print(f"[!] AI response length too different ({len_ratio:.2f}x), using original")
             return original
         
         return cleaned
     
     def _show_diff(self, original: str, corrected: str):
-        """Show what was corrected."""
+        """Show what was corrected"""
         orig_words = set(original.lower().split())
         corr_words = set(corrected.lower().split())
         
@@ -161,36 +270,6 @@ CORRECTED TRANSCRIPT:"""
                 print(f"    - Removed/Changed: '{r}'")
             for a in list(added)[:5]:
                 print(f"    + Added/Fixed: '{a}'")
-    
-    def _basic_corrections(self, transcript: str) -> str:
-        """Basic dictionary-based corrections as fallback."""
-        corrections = {
-            # Acrylamide
-            "acral mites": "acrylamide",
-            "acral mite": "acrylamide",
-            "acryl mites": "acrylamide",
-            "acral might": "acrylamide",
-            "acryl amide": "acrylamide",
-            "acrylmide": "acrylamide",
-            
-            # Carcinogen
-            "carcino gen": "carcinogen",
-            "karcinogen": "carcinogen",
-            
-            # Common medical terms
-            "die a betes": "diabetes",
-            "dia betes": "diabetes",
-            "coles terol": "cholesterol",
-            "hyper tension": "hypertension",
-            "cardio vascular": "cardiovascular",
-        }
-        
-        result = transcript
-        for wrong, correct in corrections.items():
-            pattern = re.compile(re.escape(wrong), re.IGNORECASE)
-            result = pattern.sub(correct, result)
-        
-        return result
 
 
 class SmartCorrector:
@@ -200,14 +279,14 @@ class SmartCorrector:
     
     @staticmethod
     def correct(transcript: str, api_key: Optional[str] = None) -> str:
-        """Static method for simple correction calls."""
+        """Static method for simple correction calls"""
         corrector = TranscriptCorrector(api_key=api_key)
         result = corrector.correct(transcript)
         return result["corrected"]
     
     @staticmethod
     def get_corrections_made(original: str, corrected: str) -> List[Dict[str, str]]:
-        """Get list of word-level changes."""
+        """Get list of word-level changes"""
         orig_words = original.lower().split()
         corr_words = corrected.lower().split()
         
