@@ -287,8 +287,9 @@ Provide accurate, evidence-based answer. Remind user to consult healthcare profe
         for v in data.get('verdicts', []):
             if isinstance(v, dict):
                 # Handle legacy records missing 'claim_english' field
+                # Create a new dict to avoid mutating the input
                 if 'claim_english' not in v:
-                    v['claim_english'] = v.get('claim', '')
+                    v = {**v, 'claim_english': v.get('claim', '')}
                 verdicts.append(ClaimVerdict(**v))
             else:
                 verdicts.append(v)
